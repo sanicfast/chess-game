@@ -4,6 +4,7 @@
 done:
 undo opponents last move
 turn an opponent's piece into another king
+place a duck
 
 todo:
 give your pawns knight moves for a turn
@@ -13,7 +14,7 @@ curse enemy pawns to only move backwards
 turn rook into catapult
 spawn in new second rank of pawns
 turn a piece over to your side
-place a duck
+hand reordering (so blast outcome can be planned)
 
 some kind of chess solitaire??
 

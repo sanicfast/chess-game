@@ -11,27 +11,19 @@
   <h1>Wacky Chess</h1>
   <div id="turn-indicator"></div>
   <div class="button-container">
-    <button id="undo-button">Undo Move</button>
-    <button id="redo-button">Redo Move</button>
+    <button type="button" id="undo-button">Undo Move</button>
+    <button type="button" id="redo-button">Redo Move</button>
   </div>
 
   <div id="main-game-layout">
-    <div id="player2-hand" class="card-hand">
-      <div class="card"></div>
-      <div class="card"></div>
-      <div class="card"></div>
-    </div>
+    <div id="player2-hand" class="card-hand"></div>
     
     <div id="game-container">
       <div id="chessboard"></div>
       <div id="game-over-message" class="hidden"></div>
     </div>
     
-    <div id="player1-hand" class="card-hand">
-      <div class="card"></div>
-      <div class="card"></div>
-      <div class="card"></div>
-    </div>
+    <div id="player1-hand" class="card-hand"></div>
   </div>
   
   <script src="script.js"></script>
