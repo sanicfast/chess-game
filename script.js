@@ -38,6 +38,8 @@ const cardTypes = [
   { name: "Blast!", effect: useBlastCard, description: "Play all other cards. Ends turn.", imagePath: 'assets/blast-card-icon.jpg'},
   { name: "Summon Duck", effect: useDuckCard, getTargets: getValidDuckPlacementSquares, requiresTarget: true, description: "Place a 🦆 on the board. Ends turn.", imagePath: 'assets/duck-card-icon.jpg'},
   { name: "Summon Pawn Army", effect: usePawnArmyCard, description: "Replenish your rank of pawns. Ends turn.", imagePath: 'assets/summon-pawn-army.jpg'},
+  { name: "Twofer", effect: useTwoferCard, endsTurn: false, description: "Make two moves on your turn.", imagePath: 'assets/twofer-card-icon.png'},
+  { name: "Rotate", effect: useRotateCard, description: "Rotate board 90 degrees.", imagePath: 'assets/rotate-card-icon.png'},
 ];
 let player1Hand = [];
 let player2Hand = [];
@@ -48,7 +50,8 @@ let possibleMoves = [];
 let isWhiteTurn = true; // Track whose turn it is (true = white, false = black)
 let gameOver = false;
 let isAnimating = false; // True while a sequenced effect (e.g. Blast) is playing out
-let cardPickups = []; // Array of {row, col} — face-down cards on the board waiting to be collected
+let boardFlipped = false; // When true, board renders from Black's perspective
+let cardPickups = []; // Array of {row, col, card} — face-down cards on the board waiting to be collected
 let turnCounter = 0; // Total turns elapsed
 let pendingPlacement = null; // When set, we're in card-targeting mode: { card, index, player, validTargets }
 
@@ -56,16 +59,36 @@ function randomSpawnInterval() {
   return Math.random() < 0.5 ? 6 : 7;
 }
 let nextCardSpawnAt = randomSpawnInterval(); // Turn number at which the next card pickup spawns
+let duckCooldowns = {}; // Maps "row,col" → turns remaining before this duck can move again
+const DUCK_COOLDOWN = 2; // Turns a duck must wait after moving before it can move again
+let twoferPending = 0; // Extra moves remaining (endTurn skips toggle while > 0)
+let twoferCardsBlocked = false; // Block card plays after Twofer until turn actually toggles
+let boardColorInverted = false; // When true, light/dark checkerboard colors are swapped (from Rotate)
 const MAX_PAWN_ARMY_SUMMONS = 3; // Max pawns Summon Pawn Army can spawn in one play
+
+// Shared draw queue: each pickup gets its card assigned at spawn time for deterministic draws.
+let cardQueue = []; // Upcoming card draws (shift from front)
+const QUEUE_REFILL_SIZE = 8; // How many cards to add per refill batch
+const QUEUE_MIN_LENGTH = 4; // Refill when queue drops below this
+
+function refillQueue() {
+  const batch = [...cardTypes].sort(() => Math.random() - 0.5);
+  cardQueue.push(...batch.map(c => ({ ...c })));
+}
 
 // History for undo/redo
 let boardHistory = [];
 let turnHistory = [];
 let pawnDoubleMoveHistory = [];
 let handHistory = []; // each entry: [p1HandCopy, p2HandCopy]
-let pickupHistory = []; // each entry: array of {row, col}
+let pickupHistory = []; // each entry: array of {row, col, card}
+let cardQueueHistory = []; // each entry: array copy of cardQueue
 let turnCounterHistory = []; // each entry: integer
 let nextCardSpawnAtHistory = []; // each entry: integer — the next spawn turn at that point in time
+let duckCooldownHistory = []; // each entry: plain object copy of duckCooldowns
+let twoferPendingHistory = []; // each entry: integer
+let twoferCardsBlockedHistory = []; // each entry: boolean
+let boardColorInvertedHistory = []; // each entry: boolean
 let historyIndex = -1; // Use -1 to indicate an empty history stack
 
 function createBoard() {
@@ -75,12 +98,15 @@ function createBoard() {
     turnIndicator.textContent = isWhiteTurn ? "White's turn" : "Black's turn";
   }
 
-  for (let row = 0; row < 8; row++) {
-    for (let col = 0; col < 8; col++) {
+  for (let vi = 0; vi < 8; vi++) {
+    for (let vj = 0; vj < 8; vj++) {
+      const row = boardFlipped ? 7 - vi : vi;
+      const col = boardFlipped ? 7 - vj : vj;
       const square = document.createElement("div");
       square.classList.add("square");
 
-      if ((row + col) % 2 === 0) {
+      const isLight = ((row + col) % 2 === 0) !== boardColorInverted;
+      if (isLight) {
         square.classList.add("light");
       } else {
         square.classList.add("dark");
@@ -104,6 +130,9 @@ function createBoard() {
       if (piece) {
         if (piece === 'D') {
           square.classList.add("duck");
+          if (duckCooldowns[`${row},${col}`]) {
+            square.classList.add("duck-cooldown");
+          }
         } else {
           // Find the corresponding CSS class from the new mapping
           const pieceClass = pieceClasses[piece];
@@ -136,6 +165,11 @@ function saveState(lastPawnDoubleMove) {
     pickupHistory = pickupHistory.slice(0, historyIndex + 1);
     turnCounterHistory = turnCounterHistory.slice(0, historyIndex + 1);
     nextCardSpawnAtHistory = nextCardSpawnAtHistory.slice(0, historyIndex + 1);
+    duckCooldownHistory = duckCooldownHistory.slice(0, historyIndex + 1);
+    cardQueueHistory = cardQueueHistory.slice(0, historyIndex + 1);
+    twoferPendingHistory = twoferPendingHistory.slice(0, historyIndex + 1);
+    twoferCardsBlockedHistory = twoferCardsBlockedHistory.slice(0, historyIndex + 1);
+    boardColorInvertedHistory = boardColorInvertedHistory.slice(0, historyIndex + 1);
   }
   boardHistory.push(JSON.parse(JSON.stringify(currentBoard)));
   turnHistory.push(isWhiteTurn);
@@ -146,9 +180,14 @@ function saveState(lastPawnDoubleMove) {
     player1Hand.map(c => ({ ...c })),
     player2Hand.map(c => ({ ...c })),
   ]);
-  pickupHistory.push(cardPickups.map(p => ({ ...p })));
+  pickupHistory.push(cardPickups.map(p => ({ ...p, card: { ...p.card } })));
   turnCounterHistory.push(turnCounter);
   nextCardSpawnAtHistory.push(nextCardSpawnAt);
+  duckCooldownHistory.push({ ...duckCooldowns });
+  cardQueueHistory.push([...cardQueue]);
+  twoferPendingHistory.push(twoferPending);
+  twoferCardsBlockedHistory.push(twoferCardsBlocked);
+  boardColorInvertedHistory.push(boardColorInverted);
   historyIndex = boardHistory.length - 1;
 }
 
@@ -156,20 +195,39 @@ function saveState(lastPawnDoubleMove) {
 // Card effect functions should be pure state mutators — they don't toggle turn,
 // save state, or re-render. That's this function's job.
 function endTurn(lastPawnDoubleMove = null) {
-  isWhiteTurn = !isWhiteTurn;
+  // Twofer: grant an extra move by skipping the turn toggle
+  let turnToggled = true;
+  if (twoferPending > 0) {
+    twoferPending--;
+    turnToggled = false;
+  } else {
+    isWhiteTurn = !isWhiteTurn;
+    twoferCardsBlocked = false;
+  }
+
   selectedSquare = null;
   possibleMoves = [];
   turnCounter++;
+
+  // Tick down all duck cooldowns
+  for (const key of Object.keys(duckCooldowns)) {
+    duckCooldowns[key]--;
+    if (duckCooldowns[key] <= 0) delete duckCooldowns[key];
+  }
+
   if (turnCounter >= nextCardSpawnAt) {
     spawnCardPickup();
     nextCardSpawnAt = turnCounter + randomSpawnInterval();
   }
-  saveState(lastPawnDoubleMove);
+  // Only save state when the turn actually ends — Twofer's intermediate
+  // moves are part of one atomic turn and should not create history entries.
+  if (turnToggled) saveState(lastPawnDoubleMove);
   createBoard();
+  renderHands();
 
   // True deadlock: the player who's now to move cannot move any piece, holds no
   // cards, and there is no shared duck to teleport. Declare a stalemate (draw).
-  if (isActivePlayerDeadlocked()) {
+  if (turnToggled && isActivePlayerDeadlocked()) {
     displayStalemate();
   }
 }
@@ -184,7 +242,7 @@ function isActivePlayerDeadlocked() {
 
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 8; c++) {
-      if (currentBoard[r][c] === 'D') return false;
+      if (currentBoard[r][c] === 'D' && !duckCooldowns[`${r},${c}`]) return false;
     }
   }
 
@@ -212,7 +270,9 @@ function spawnCardPickup() {
   }
   if (emptySquares.length === 0) return;
   const pick = emptySquares[Math.floor(Math.random() * emptySquares.length)];
-  cardPickups.push(pick);
+  if (cardQueue.length < QUEUE_MIN_LENGTH) refillQueue();
+  const card = cardQueue.shift();
+  cardPickups.push({ ...pick, card });
 }
 
 // Async pause used by sequenced card effects (currently only Blast).
@@ -431,6 +491,11 @@ function handleSquareClick(row, col) {
         currentBoard[row][col] = selectedSquare.piece;
         currentBoard[selectedSquare.row][selectedSquare.col] = "";
 
+        // Set cooldown when a duck moves (+1 because endTurn will immediately decrement it)
+        if (selectedSquare.piece === 'D') {
+          delete duckCooldowns[`${selectedSquare.row},${selectedSquare.col}`];
+          duckCooldowns[`${row},${col}`] = DUCK_COOLDOWN + 1;
+        }
 
         // Castling -- Move the rook as well
         if (selectedSquare.piece.toLowerCase() === 'k' && 
@@ -450,8 +515,10 @@ function handleSquareClick(row, col) {
         if (selectedSquare.piece !== 'D') {
           const pickupIdx = cardPickups.findIndex(p => p.row === row && p.col === col);
           if (pickupIdx >= 0) {
+            const pickup = cardPickups[pickupIdx];
             cardPickups.splice(pickupIdx, 1);
-            drawCard(isWhiteTurn ? player1Hand : player2Hand);
+            const hand = isWhiteTurn ? player1Hand : player2Hand;
+            if (hand.length < 9) hand.push({ ...pickup.card });
             console.log(`${isWhiteTurn ? 'White' : 'Black'} collected a card!`);
           }
         }
@@ -464,8 +531,9 @@ function handleSquareClick(row, col) {
     possibleMoves = [];
   } else {
     if (piece) {
-      // Duck can be selected by either player; normal pieces require turn match
-      const canSelect = piece === 'D' ||
+      // Duck can be selected by either player if not on cooldown; normal pieces require turn match
+      const duckReady = piece !== 'D' || !duckCooldowns[`${row},${col}`];
+      const canSelect = (piece === 'D' && duckReady) ||
         (isWhiteTurn && piece === piece.toUpperCase()) ||
         (!isWhiteTurn && piece === piece.toLowerCase());
       if (canSelect) {
@@ -483,7 +551,7 @@ function handleSquareClick(row, col) {
 }
 
 function undoMove() {
-  if (isAnimating) return;
+  if (isAnimating || twoferCardsBlocked) return;
   if (historyIndex > 0) {
     historyIndex--;
     currentBoard = JSON.parse(JSON.stringify(boardHistory[historyIndex]));
@@ -491,9 +559,14 @@ function undoMove() {
     // Restore hands — copy again so the live hand doesn't alias history.
     player1Hand = handHistory[historyIndex][0].map(c => ({ ...c }));
     player2Hand = handHistory[historyIndex][1].map(c => ({ ...c }));
-    cardPickups = pickupHistory[historyIndex].map(p => ({ ...p }));
+    cardPickups = pickupHistory[historyIndex].map(p => ({ ...p, card: { ...p.card } }));
     turnCounter = turnCounterHistory[historyIndex];
     nextCardSpawnAt = nextCardSpawnAtHistory[historyIndex];
+    duckCooldowns = { ...duckCooldownHistory[historyIndex] };
+    cardQueue = [...cardQueueHistory[historyIndex]];
+    twoferPending = twoferPendingHistory[historyIndex];
+    twoferCardsBlocked = twoferCardsBlockedHistory[historyIndex];
+    boardColorInverted = boardColorInvertedHistory[historyIndex];
     selectedSquare = null;
     possibleMoves = [];
     createBoard();
@@ -502,16 +575,21 @@ function undoMove() {
 }
 
 function redoMove() {
-  if (isAnimating) return;
+  if (isAnimating || twoferCardsBlocked) return;
   if (historyIndex < boardHistory.length - 1) {
     historyIndex++;
     currentBoard = JSON.parse(JSON.stringify(boardHistory[historyIndex]));
     isWhiteTurn = turnHistory[historyIndex];
     player1Hand = handHistory[historyIndex][0].map(c => ({ ...c }));
     player2Hand = handHistory[historyIndex][1].map(c => ({ ...c }));
-    cardPickups = pickupHistory[historyIndex].map(p => ({ ...p }));
+    cardPickups = pickupHistory[historyIndex].map(p => ({ ...p, card: { ...p.card } }));
     turnCounter = turnCounterHistory[historyIndex];
     nextCardSpawnAt = nextCardSpawnAtHistory[historyIndex];
+    duckCooldowns = { ...duckCooldownHistory[historyIndex] };
+    cardQueue = [...cardQueueHistory[historyIndex]];
+    twoferPending = twoferPendingHistory[historyIndex];
+    twoferCardsBlocked = twoferCardsBlockedHistory[historyIndex];
+    boardColorInverted = boardColorInvertedHistory[historyIndex];
     selectedSquare = null;
     possibleMoves = [];
     createBoard();
@@ -668,11 +746,75 @@ function usePawnArmyCard() {
 }
 
 function useRewindCard() {
-  // Restore the board to before the opponent's last action without moving historyIndex.
+  // Restore all state to before the opponent's last action without moving historyIndex.
   // This preserves the original history so that Undo after Rewind un-does the card play.
   if (historyIndex > 0) {
-    currentBoard = JSON.parse(JSON.stringify(boardHistory[historyIndex - 1]));
+    const i = historyIndex - 1;
+    currentBoard = JSON.parse(JSON.stringify(boardHistory[i]));
+
+    // When inside Blast (isAnimating), only rewind the board — Blast's loop manages
+    // hands/pickups itself, and restoring them would corrupt the iteration.
+    if (!isAnimating) {
+      player1Hand = handHistory[i][0].map(c => ({ ...c }));
+      player2Hand = handHistory[i][1].map(c => ({ ...c }));
+      cardPickups = pickupHistory[i].map(p => ({ ...p, card: { ...p.card } }));
+      turnCounter = turnCounterHistory[i];
+      nextCardSpawnAt = nextCardSpawnAtHistory[i];
+      duckCooldowns = { ...duckCooldownHistory[i] };
+      cardQueue = [...cardQueueHistory[i]];
+      twoferPending = twoferPendingHistory[i];
+      twoferCardsBlocked = twoferCardsBlockedHistory[i];
+      boardColorInverted = boardColorInvertedHistory[i];
+
+      // Re-consume the Rewind card: handleCardClick spliced it before calling this,
+      // but restoring hands from history put it back. Remove it again.
+      const hand = isWhiteTurn ? player1Hand : player2Hand;
+      const rewindIdx = hand.findIndex(c => c.name === "Rewind");
+      if (rewindIdx >= 0) hand.splice(rewindIdx, 1);
+    }
   }
+}
+
+function useTwoferCard() {
+  // Inside Blast, grant no extra move (Blast already plays all cards at once)
+  if (isAnimating) return;
+  twoferPending = 1;
+  twoferCardsBlocked = true;
+}
+
+function useRotateCard() {
+  // Rotate the whole board 90° counter-clockwise: source (r,c) -> destination (7-c, r).
+  // a1->h1->h8->a8, b1->h2, e4->e5, etc.
+  const rotated = Array.from({ length: 8 }, () => Array(8).fill(""));
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      rotated[7 - c][r] = currentBoard[r][c];
+    }
+  }
+
+  // A pawn carried onto the opponent's back rank auto-promotes to a queen of its own color.
+  // White 'P' reaches rank 8 (row 0) -> 'Q'; black 'p' reaches rank 1 (row 7) -> 'q'.
+  for (let c = 0; c < 8; c++) {
+    if (rotated[0][c] === 'P') rotated[0][c] = 'Q';
+    if (rotated[7][c] === 'p') rotated[7][c] = 'q';
+  }
+
+  currentBoard = rotated;
+
+  // Card pickups sit on the turning board, so rotate their positions too.
+  cardPickups = cardPickups.map(p => ({ ...p, row: 7 - p.col, col: p.row }));
+
+  // Duck cooldowns are keyed by position — remap them so a duck mid-cooldown stays on cooldown.
+  const rotatedCooldowns = {};
+  for (const key of Object.keys(duckCooldowns)) {
+    const [r, c] = key.split(',').map(Number);
+    rotatedCooldowns[`${7 - c},${r}`] = duckCooldowns[key];
+  }
+  duckCooldowns = rotatedCooldowns;
+
+  // A 90° rotation flips the color parity of every square; invert the checkerboard
+  // so each piece visually stays on the same color it started on.
+  boardColorInverted = !boardColorInverted;
 }
 
 function useFunDeleterCard() {
@@ -725,7 +867,14 @@ async function useBlastCard() {
   document.getElementById("undo-button").disabled = true;
   document.getElementById("redo-button").disabled = true;
   const hand = isWhiteTurn ? player1Hand : player2Hand;
-  const toPlay = [...hand]; // snapshot — later additions (Yoink steals) don't fire
+  // Hoist Rewinds to fire before any other Blast sub-card. Rewind restores currentBoard
+  // from boardHistory, so running it after a board-mutating card (duck, passed pawn,
+  // pawn army) would wipe out that card's placement. Rewinds are idempotent — running
+  // more than one in a row just re-restores the same snapshot.
+  const snapshot = [...hand]; // snapshot — later additions (Yoink steals) don't fire
+  const rewinds = snapshot.filter(c => c.effect === useRewindCard);
+  const others = snapshot.filter(c => c.effect !== useRewindCard && c.effect !== useBlastCard);
+  const toPlay = [...rewinds, ...others];
   for (const card of toPlay) {
     if (card.effect !== useBlastCard) {
       if (card.requiresTarget && card.getTargets) {
@@ -819,6 +968,7 @@ function createCardElement(card, index, player) {
 
 async function handleCardClick(index, player) {
   if (gameOver || isAnimating) return;
+  if (twoferCardsBlocked) return; // Twofer locks card plays until the turn fully ends
 
   // If currently in targeting mode, cancel it (clicking a card while armed dismisses)
   if (pendingPlacement) {
@@ -859,7 +1009,7 @@ async function handleCardClick(index, player) {
       // Centralized turn end handles toggle + save + board render.
       // Cards with endsTurn: false let the player still make a move this turn.
       if (card.endsTurn === false) {
-        saveState();
+        if (!twoferPending) saveState(); // Defer save for Twofer — turn not finished yet
         createBoard();
       } else {
         endTurn();
@@ -874,6 +1024,10 @@ async function handleCardClick(index, player) {
 
 document.getElementById("undo-button").addEventListener("click", undoMove);
 document.getElementById("redo-button").addEventListener("click", redoMove);
+document.getElementById("flip-button").addEventListener("click", () => {
+  boardFlipped = !boardFlipped;
+  createBoard();
+});
 
 // DEBUG: Starting cards for development — in production, cards are earned from board pickups only
 for (let i = 0; i < 4; i++) {
@@ -881,7 +1035,8 @@ for (let i = 0; i < 4; i++) {
   drawCard(player2Hand);
 }
 
-// Spawn the first card pickup immediately so there's something to play towards from turn 1
+// Seed the shared draw queue and spawn the first card pickup
+refillQueue();
 spawnCardPickup();
 
 // Initial state setup

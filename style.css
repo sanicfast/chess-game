@@ -135,6 +135,12 @@ h1 {
 /* Duck piece — raster on the board */
 .duck { background-image: url('assets/duck.webp'); background-size: contain; background-repeat: no-repeat; background-position: center; }
 
+/* Duck on cooldown — dimmed to indicate it cannot move */
+.duck.duck-cooldown {
+  opacity: 0.45;
+  filter: grayscale(0.6);
+}
+
 /* Card targeting mode — valid placement highlights (gold dots) */
 .square.targetable {
   position: relative;
