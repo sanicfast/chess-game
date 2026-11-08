@@ -522,7 +522,7 @@ function handleKingCapture(kingRow, kingCol, activeTurn) {
   for (let r = 0; r < 8; r++) {
       for (let c = 0; c < 8; c++) {
           const piece = currentBoard[r][c];
-          if (piece) {
+          if (piece && piece !== 'D') {
               const isWhitePiece = piece === piece.toUpperCase();
               // Find pieces of the player who lost their king
               if (isWhiteKingCaptured === isWhitePiece ) {
@@ -590,7 +590,7 @@ function useKingifyCard() {
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 8; c++) {
       const piece = currentBoard[r][c];
-      if (piece) {
+      if (piece && piece !== 'D') {
         // Check if the piece belongs to the opponent and is not a king
         if (opponentIsWhite === (piece === piece.toUpperCase()) && piece.toLowerCase() !== 'k') {
           opponentPieces.push({ row: r, col: c });
