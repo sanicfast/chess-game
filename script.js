@@ -32,7 +32,7 @@ const BLAST_STEP_DELAY_MS = 1500; // Pause between each card fired by Blast, so 
 const cardTypes = [
   { name: "Kingify", effect: useKingifyCard, description: "Turns a random opponent piece into a king. Ends turn.", imagePath: 'assets/kingify-card-icon.png'},
   { name: "Summon Passed Pawn", effect: usePassedPawnCard, description: "Summon a pawn onto the second to last rank. Ends turn.", imagePath: 'assets/passedpawn-card-icon.png'},
-  { name: "Rewind", effect: useRewindCard, description: "Undo opponent's last action.", imagePath: 'assets/rewind-card-icon.png'},
+  { name: "Rewind", effect: useRewindCard, endsTurn: false, description: "Undo opponent's last action.", imagePath: 'assets/rewind-card-icon.png'},
   { name: "Fun Deleter", effect: useFunDeleterCard, description: "Remove random card from opponent's hand.", imagePath: 'assets/delete-card-icon.png'},
   { name: "Yoink!", effect: useYoinkCard, description: "Steal a random card from opponent's hand. Ends turn.", imagePath: 'assets/steal-card-icon.jpg'},
   { name: "Blast!", effect: useBlastCard, description: "Play all other cards. Ends turn.", imagePath: 'assets/blast-card-icon.jpg'},
@@ -49,10 +49,13 @@ let isWhiteTurn = true; // Track whose turn it is (true = white, false = black)
 let gameOver = false;
 let isAnimating = false; // True while a sequenced effect (e.g. Blast) is playing out
 let cardPickups = []; // Array of {row, col} — face-down cards on the board waiting to be collected
-let turnCounter = 0; // Total turns elapsed; card spawns every CARD_SPAWN_INTERVAL turns
+let turnCounter = 0; // Total turns elapsed
 let pendingPlacement = null; // When set, we're in card-targeting mode: { card, index, player, validTargets }
 
-const CARD_SPAWN_INTERVAL = 6; // A card pickup spawns after each player has had 3 turns (6 total moves)
+function randomSpawnInterval() {
+  return Math.random() < 0.5 ? 6 : 7;
+}
+let nextCardSpawnAt = randomSpawnInterval(); // Turn number at which the next card pickup spawns
 const MAX_PAWN_ARMY_SUMMONS = 3; // Max pawns Summon Pawn Army can spawn in one play
 
 // History for undo/redo
@@ -62,6 +65,7 @@ let pawnDoubleMoveHistory = [];
 let handHistory = []; // each entry: [p1HandCopy, p2HandCopy]
 let pickupHistory = []; // each entry: array of {row, col}
 let turnCounterHistory = []; // each entry: integer
+let nextCardSpawnAtHistory = []; // each entry: integer — the next spawn turn at that point in time
 let historyIndex = -1; // Use -1 to indicate an empty history stack
 
 function createBoard() {
@@ -131,6 +135,7 @@ function saveState(lastPawnDoubleMove) {
     handHistory = handHistory.slice(0, historyIndex + 1);
     pickupHistory = pickupHistory.slice(0, historyIndex + 1);
     turnCounterHistory = turnCounterHistory.slice(0, historyIndex + 1);
+    nextCardSpawnAtHistory = nextCardSpawnAtHistory.slice(0, historyIndex + 1);
   }
   boardHistory.push(JSON.parse(JSON.stringify(currentBoard)));
   turnHistory.push(isWhiteTurn);
@@ -143,6 +148,7 @@ function saveState(lastPawnDoubleMove) {
   ]);
   pickupHistory.push(cardPickups.map(p => ({ ...p })));
   turnCounterHistory.push(turnCounter);
+  nextCardSpawnAtHistory.push(nextCardSpawnAt);
   historyIndex = boardHistory.length - 1;
 }
 
@@ -154,8 +160,9 @@ function endTurn(lastPawnDoubleMove = null) {
   selectedSquare = null;
   possibleMoves = [];
   turnCounter++;
-  if (turnCounter % CARD_SPAWN_INTERVAL === 0) {
+  if (turnCounter >= nextCardSpawnAt) {
     spawnCardPickup();
+    nextCardSpawnAt = turnCounter + randomSpawnInterval();
   }
   saveState(lastPawnDoubleMove);
   createBoard();
@@ -486,6 +493,7 @@ function undoMove() {
     player2Hand = handHistory[historyIndex][1].map(c => ({ ...c }));
     cardPickups = pickupHistory[historyIndex].map(p => ({ ...p }));
     turnCounter = turnCounterHistory[historyIndex];
+    nextCardSpawnAt = nextCardSpawnAtHistory[historyIndex];
     selectedSquare = null;
     possibleMoves = [];
     createBoard();
@@ -503,6 +511,7 @@ function redoMove() {
     player2Hand = handHistory[historyIndex][1].map(c => ({ ...c }));
     cardPickups = pickupHistory[historyIndex].map(p => ({ ...p }));
     turnCounter = turnCounterHistory[historyIndex];
+    nextCardSpawnAt = nextCardSpawnAtHistory[historyIndex];
     selectedSquare = null;
     possibleMoves = [];
     createBoard();
@@ -848,7 +857,13 @@ async function handleCardClick(index, player) {
       await card.effect();
 
       // Centralized turn end handles toggle + save + board render.
-      endTurn();
+      // Cards with endsTurn: false let the player still make a move this turn.
+      if (card.endsTurn === false) {
+        saveState();
+        createBoard();
+      } else {
+        endTurn();
+      }
       renderHands();
     }
   } else {
