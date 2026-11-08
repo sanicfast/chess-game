@@ -38,8 +38,8 @@ const cardTypes = [
   { name: "Blast!", effect: useBlastCard, description: "Play all other cards. Ends turn.", imagePath: 'assets/blast-card-icon.jpg'},
   { name: "Summon Duck", effect: useDuckCard, getTargets: getValidDuckPlacementSquares, requiresTarget: true, description: "Place a 🦆 on the board. Ends turn.", imagePath: 'assets/duck-card-icon.jpg'},
   { name: "Summon Pawn Army", effect: usePawnArmyCard, description: "Replenish your rank of pawns. Ends turn.", imagePath: 'assets/summon-pawn-army.jpg'},
-  { name: "Twofer", effect: useTwoferCard, endsTurn: false, description: "Make two moves on your turn.", imagePath: 'assets/twofer-card-icon.png'},
-  { name: "Rotate", effect: useRotateCard, description: "Rotate board 90 degrees.", imagePath: 'assets/rotate-card-icon.png'},
+  { name: "Twofer", effect: useTwoferCard, endsTurn: false, description: "Make two moves on your turn.", imagePath: 'assets/twofer-card-icon.jpg'},
+  { name: "Rotate", effect: useRotateCard, description: "Rotate board 90 degrees.", imagePath: 'assets/rotate-card-icon.jpg'},
 ];
 let player1Hand = [];
 let player2Hand = [];
@@ -344,6 +344,69 @@ function getValidDuckPlacementSquares() {
   return getDuckMoves();
 }
 
+// True if the square (row,col) is attacked by any enemy piece of color `byWhite`.
+// Scans the board directly (independent of getPossibleMoves, so no recursion).
+// Pawns attack only diagonally; sliding pieces cast rays; the neutral duck never attacks.
+function isSquareAttacked(row, col, byWhite) {
+  const ownerIsWhite = (p) => (p === p.toUpperCase());
+  const belongsTo = (p) => p && p !== 'D' && ownerIsWhite(p) === byWhite;
+
+  // Pawn attacks: a byWhite pawn sits on the diagonal toward its own side.
+  // A white pawn at pr attacks pr-1, so an attacker for `row` lives at row+1.
+  const pawnRow = byWhite ? row + 1 : row - 1;
+  if (pawnRow >= 0 && pawnRow < 8) {
+    for (const dc of [-1, 1]) {
+      const pc = col + dc;
+      if (pc >= 0 && pc < 8 && currentBoard[pawnRow][pc]?.toLowerCase() === 'p' &&
+          belongsTo(currentBoard[pawnRow][pc])) return true;
+    }
+  }
+
+  // Knight attacks
+  for (const [dr, dc] of [[2,1],[2,-1],[1,2],[1,-2],[-2,1],[-2,-1],[-1,2],[-1,-2]]) {
+    const r = row + dr, c = col + dc;
+    if (r >= 0 && r < 8 && c >= 0 && c < 8 && currentBoard[r][c]?.toLowerCase() === 'n' &&
+        belongsTo(currentBoard[r][c])) return true;
+  }
+
+  // King attacks (adjacency) — a king is attacked by an adjacent enemy king.
+  for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[-1,1],[1,-1],[1,1]]) {
+    const r = row + dr, c = col + dc;
+    if (r >= 0 && r < 8 && c >= 0 && c < 8 && currentBoard[r][c]?.toLowerCase() === 'k' &&
+        belongsTo(currentBoard[r][c])) return true;
+  }
+
+  // Orthogonal sliders: rook or queen
+  for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+    for (let i = 1; i < 8; i++) {
+      const r = row + dr * i, c = col + dc * i;
+      if (r < 0 || r > 7 || c < 0 || c > 7) break;
+      const p = currentBoard[r][c];
+      if (p) {
+        const pt = p.toLowerCase();
+        if (belongsTo(p) && (pt === 'r' || pt === 'q')) return true;
+        break;
+      }
+    }
+  }
+
+  // Diagonal sliders: bishop or queen
+  for (const [dr, dc] of [[-1,-1],[-1,1],[1,-1],[1,1]]) {
+    for (let i = 1; i < 8; i++) {
+      const r = row + dr * i, c = col + dc * i;
+      if (r < 0 || r > 7 || c < 0 || c > 7) break;
+      const p = currentBoard[r][c];
+      if (p) {
+        const pt = p.toLowerCase();
+        if (belongsTo(p) && (pt === 'b' || pt === 'q')) return true;
+        break;
+      }
+    }
+  }
+
+  return false;
+}
+
 function getPossibleMoves(row, col, piece) {
   const moves = [];
   const isWhite = piece === piece.toUpperCase();
@@ -408,17 +471,27 @@ function getPossibleMoves(row, col, piece) {
   }
 
   if (piece.toLowerCase() === 'k') {
-    moves.push(...getStepMoves(row, col, isWhite, [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [-1, 1], [1, -1], [1, 1]]));
-    // Castling (Simple, we don't care about check or prior moves)
+    const enemyIsWhite = !isWhite;
+    const safe = (r, c) => !isSquareAttacked(r, c, enemyIsWhite);
+
+    // A king may not step onto a square attacked by an enemy piece.
+    for (const m of getStepMoves(row, col, isWhite, [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [-1, 1], [1, -1], [1, 1]])) {
+      if (safe(m.row, m.col)) moves.push(m);
+    }
+
+    // Castling (Simple — we don't track prior rook/king moves) — but the king may not
+    // castle out of, through, or into an attacked square.
     const kingRow = isWhite ? 7 : 0;
     if (row === kingRow && col === 4) {
-      // Kingside
-      if (currentBoard[kingRow][5] === "" && currentBoard[kingRow][6] === "" &&
+      // Kingside: king travels col 4 -> 5 -> 6, so all three must be safe.
+      if (safe(kingRow, 4) && safe(kingRow, 5) && safe(kingRow, 6) &&
+          currentBoard[kingRow][5] === "" && currentBoard[kingRow][6] === "" &&
           currentBoard[kingRow][7] === (isWhite ? 'R' : 'r')) {
         moves.push({ row: kingRow, col: 6 });
       }
-      // Queenside
-      if (currentBoard[kingRow][3] === "" && currentBoard[kingRow][2] === "" && currentBoard[kingRow][1] === "" &&
+      // Queenside: king travels col 4 -> 3 -> 2, so all three must be safe.
+      if (safe(kingRow, 4) && safe(kingRow, 3) && safe(kingRow, 2) &&
+          currentBoard[kingRow][3] === "" && currentBoard[kingRow][2] === "" && currentBoard[kingRow][1] === "" &&
           currentBoard[kingRow][0] === (isWhite ? 'R' : 'r')) {
         moves.push({ row: kingRow, col: 2 });
       }
