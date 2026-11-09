@@ -152,3 +152,102 @@ test('same rng seed replays deterministically', () => {
   };
   assert.equal(run(), run());
 });
+
+// ---- Step 2: migrated cards, ownership, blast, determinism, game over ----
+const countRow = (board, r, ch) => board[r].filter((x) => x === ch).length;
+
+test('playCard kingify: crowns chosen opponent piece (deterministic via choice)', () => {
+  const b = EMPTY(); put(b, 1, 1, 'p'); put(b, 2, 2, 'r');
+  const s = withBoard(b, { hands: { player1: [{ id: 'kingify' }], player2: [] } });
+  const n = C.applyAction(s, { type: 'playCard', by: 'player1', cardId: 'kingify', choice: 0 }, det());
+  assert.equal(n.board[1][1], 'k', 'first opponent piece crowned');
+  assert.equal(n.board[2][2], 'r');
+  assert.equal(n.hands.player1.length, 0);
+  assert.equal(n.isWhiteTurn, false, 'ends turn');
+});
+
+test('playCard passedpawn: spawns mover pawn on the 2nd-to-last rank', () => {
+  const s = withBoard(EMPTY(), { hands: { player1: [{ id: 'passedpawn' }], player2: [] } });
+  const n = C.applyAction(s, { type: 'playCard', by: 'player1', cardId: 'passedpawn', choice: 3 }, det());
+  assert.equal(n.board[1][3], 'P');
+});
+
+test('playCard pawnarmy: fills up to MAX_PAWN_ARMY_SUMMONS home-rank squares', () => {
+  const s = withBoard(EMPTY(), { hands: { player1: [{ id: 'pawnarmy' }], player2: [] } });
+  const n = C.applyAction(s, { type: 'playCard', by: 'player1', cardId: 'pawnarmy', choices: [0, 1, 2, 3, 4] }, det());
+  assert.equal(countRow(n.board, 6, 'P'), C.MAX_PAWN_ARMY_SUMMONS, 'exactly 3 pawns');
+});
+
+test('playCard funDeleter: removes a chosen card from the opponent hand', () => {
+  const s = withBoard(EMPTY(), { hands: { player1: [{ id: 'fundeleter' }], player2: [{ id: 'rotate' }, { id: 'duck' }] } });
+  const n = C.applyAction(s, { type: 'playCard', by: 'player1', cardId: 'fundeleter', choice: 0 }, det());
+  assert.equal(n.hands.player2.length, 1);
+  assert.equal(n.hands.player2[0].id, 'duck', 'index-0 card removed');
+});
+
+test('playCard yoink: steals a chosen opponent card into the mover hand', () => {
+  const s = withBoard(EMPTY(), { hands: { player1: [{ id: 'yoink' }], player2: [{ id: 'rotate' }, { id: 'twofer' }] } });
+  const n = C.applyAction(s, { type: 'playCard', by: 'player1', cardId: 'yoink', choice: 1 }, det());
+  assert.deepEqual(n.hands.player1, [{ id: 'twofer' }]);
+  assert.equal(n.hands.player2.length, 1);
+});
+
+test('playCard rejects a card played out of turn', () => {
+  const s = withBoard(EMPTY(), { hands: { player1: [], player2: [{ id: 'rotate' }] } });
+  const n = C.applyAction(s, { type: 'playCard', by: 'player2', cardId: 'rotate' }, det());
+  assert.equal(n.isWhiteTurn, true, 'turn unchanged');
+  assert.equal(n.hands.player2.length, 1, 'card not consumed');
+  assert.equal(n.boardColorInverted, false, 'effect not applied');
+});
+
+test('blast: consumes other cards, passespawn fires, twofer is a no-op', () => {
+  const s = withBoard(EMPTY(), { hands: { player1: [{ id: 'twofer' }, { id: 'passedpawn' }, { id: 'blast' }], player2: [] } });
+  const n = C.applyAction(s, { type: 'playCard', by: 'player1', cardId: 'blast' }, det());
+  assert.equal(n.hands.player1.length, 0, 'all blast sub-cards consumed');
+  assert.equal(n.twoferPending, 0, 'twofer inside blast does not grant an extra move');
+  assert.ok(countRow(n.board, 1, 'P') === 1, 'passedpawn still fired');
+  assert.equal(n.isWhiteTurn, false, 'blast ends the turn once');
+});
+
+test('blast: rewinds are hoisted before board-mutating cards', () => {
+  let s = base(); // initial snapshot at history[0]
+  s = C.applyAction(s, { type: 'move', from: { row: 6, col: 4 }, to: { row: 4, col: 4 } }, det()); // e4 -> history[1]
+  // Black to move plays a blast whose rewind restores the pre-e4 board, then passedpawn spawns.
+  s.hands.player2 = [{ id: 'passedpawn' }, { id: 'rewind' }, { id: 'blast' }];
+  const n = C.applyAction(s, { type: 'playCard', by: 'player2', cardId: 'blast' }, det());
+  assert.equal(n.board[6][4], 'P', 'rewind restored e2 pawn (e4 undone)');
+  assert.ok(countRow(n.board, 1, 'p') >= 1, 'passedpawn fired AFTER the hoisted rewind and survived');
+});
+
+test('blastFrames: returns intermediate frames + final, without mutating input', () => {
+  const s = withBoard(EMPTY(), { hands: { player1: [{ id: 'passedpawn' }, { id: 'blast' }], player2: [] } });
+  const before = JSON.stringify(s);
+  const frames = C.blastFrames(s, { type: 'playCard', by: 'player1', cardId: 'blast' }, det());
+  assert.ok(frames.length >= 2, 'at least one sub-card frame + final');
+  assert.equal(frames[frames.length - 1].isWhiteTurn, false, 'final frame is post-turn-end');
+  assert.equal(JSON.stringify(s), before, 'blastFrames does not mutate input');
+});
+
+test('same seed on a random card replays identically', () => {
+  const mk = () => withBoard(EMPTY(), { hands: { player1: [{ id: 'passedpawn' }], player2: [] } });
+  const a = C.applyAction(mk(), { type: 'playCard', by: 'player1', cardId: 'passedpawn', seed: 123 });
+  const b = C.applyAction(mk(), { type: 'playCard', by: 'player1', cardId: 'passedpawn', seed: 123 });
+  assert.equal(JSON.stringify(a), JSON.stringify(b));
+});
+
+test('capturing the last enemy piece ends the game', () => {
+  const b = EMPTY(); put(b, 7, 4, 'K'); put(b, 3, 3, 'Q'); put(b, 3, 4, 'k');
+  const s = withBoard(b);
+  const n = C.applyAction(s, { type: 'move', from: { row: 3, col: 3 }, to: { row: 3, col: 4 } }, det());
+  assert.equal(n.gameOver, true);
+  assert.equal(n.winner, 'White');
+});
+
+test('a side with no cards/pieces/duck is stalemated on their turn', () => {
+  const b = EMPTY(); put(b, 7, 4, 'K'); put(b, 6, 0, 'P'); // black has nothing
+  const s = withBoard(b);
+  const n = C.applyAction(s, { type: 'move', from: { row: 6, col: 0 }, to: { row: 5, col: 0 } }, det());
+  assert.equal(n.isWhiteTurn, false, 'now black to move');
+  assert.equal(n.draw, true, 'black is deadlocked -> stalemate');
+  assert.equal(n.gameOver, true);
+});
