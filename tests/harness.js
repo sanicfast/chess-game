@@ -71,7 +71,11 @@ function loadGame() {
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   const ctx = vm.createContext(sandbox);
+  const coreSrc = fs.readFileSync(path.join(__dirname, '..', 'game', 'core.js'), 'utf8');
   const src = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
+  // Load the pure core first so script.js can delegate to globalThis.DuckChessCore,
+  // then the view/controller (script.js), then the export shim.
+  vm.runInContext(coreSrc, ctx, { filename: 'game/core.js' });
   vm.runInContext(src + SHIM, ctx, { filename: 'script.js' });
   if (!sandbox.__G) throw new Error('shim failed to attach __G');
   return sandbox.__G;
