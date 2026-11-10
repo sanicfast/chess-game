@@ -22,6 +22,13 @@ let net = null;               // WackyChessNet room when in net mode, else null
 let mySide = null;            // 'player1' | 'player2' when in net mode
 let roomCode = null;          // room/channel name in net mode
 
+// --- online (Liveblocks) config -------------------------------------------------
+// Paste your Liveblocks project's PUBLIC key (starts with "pk_") here to enable
+// cross-device play. While this is the placeholder, "Join" uses the same-browser
+// cross-tab transport instead, so local play and tests are unaffected.
+// Dashboard note: set the project's default room access to "Public" so guests can enter.
+const LIVEBLOCKS_PUBLIC_KEY = "pk_prod_4Vz0AzsTrb_aSiekY-WlgHFJHc1Nf0cAJ-A-dkLXqN4QadXnoy479Cl7MGSwZO-_";
+
 function dispatch(action) { state = C.applyAction(state, action); render(); }
 function dispatchMove(from, to) {
   if (net) { net.move(from, to); }
@@ -115,7 +122,8 @@ function renderTurnIndicator() {
     let label = state.isWhiteTurn ? "White\u2019s turn" : "Black\u2019s turn";
     if (net && mySide) {
       const who = mySide === "player1" ? "You are White" : "You are Black";
-      const conn = net.peerOnline() ? "opponent connected" : "waiting for opponent...";
+      const st = (net.netStatus ? net.netStatus() : (net.peerOnline() ? "connected" : "waiting"));
+      const conn = net.peerOnline() ? "opponent connected" : ("[" + (net.transportName || "?") + ": " + st + "] waiting for opponent…");
       label += " | " + who + " | room: " + roomCode + " | " + conn;
     }
     t.textContent = label;
@@ -233,22 +241,58 @@ function redo() { if (state && !net && !isAnimating) dispatch({ type: "redo" });
 
 // ---------- start menu: local or cross-tab multiplayer ----------
 function hashSeed(str) { let h = 2166136261 >>> 0; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
-const debugCards = (n) => Array.from({ length: n }, () => ({ id: C.CARDS[Math.floor(Math.random() * C.CARDS.length)].id }));
+function randomRoomCode() { const A = "abcdefghjkmnpqrstuvwxyz23456789"; let s = ""; for (let i = 0; i < 4; i++) s += A[Math.floor(Math.random() * A.length)]; return "wacky-" + s; }
+function roomCodeFromUrl() { try { const r = new URLSearchParams(location.search).get("room"); return r ? r.trim().slice(0, 64) : null; } catch (_) { return null; } }
+
+// --- lobby: connect to a room and show which colors are already claimed ---
+let lobby = null;   // { code, conn, presence } while the start menu is watching a room
+function makeTransport(code) {
+  const channelName = "wacky-chess:" + code;
+  const useLiveblocks = !!LIVEBLOCKS_PUBLIC_KEY && LIVEBLOCKS_PUBLIC_KEY !== "REPLACE_WITH_YOUR_PK_KEY" && typeof window !== "undefined";
+  return useLiveblocks
+    ? WackyChessNet.liveblocksTransport({ roomId: channelName, publicApiKey: LIVEBLOCKS_PUBLIC_KEY })
+    : WackyChessNet.broadcastTransport(channelName);
+}
+function openLobby(code, refresh) {
+  closeLobby();
+  if (typeof WackyChessNet === "undefined") return; // not in the browser / tests
+  let conn, presence;
+  try { conn = makeTransport(code); presence = WackyChessNet.createPresence(conn, { heartbeatMs: 800, timeoutMs: 2600 }); } catch (_) { return; }
+  presence.onChange(() => { if (lobby) refresh(); });
+  presence.start();
+  lobby = { code, conn, presence };
+  if (refresh) refresh();
+}
+function closeLobby() { if (lobby && lobby.presence) { try { lobby.presence.stop(); } catch (_) {} } lobby = null; }
+function joinSide(color, closeOverlay, refresh) {
+  if (!lobby || !lobby.presence) return;
+  const seat = color === "player1" ? "white" : "black";   // presence uses white/black; engine uses player1/player2
+  if (lobby.presence.isTaken(seat)) { refresh(); return; }
+  const got = lobby.presence.setSeat(seat);
+  if (got !== seat) { refresh(); return; }   // a lower-token peer claimed it simultaneously → yield
+  const conn = lobby.conn, code = lobby.code;
+  lobby = null;                                // keep conn + presence alive so we stay occupied during play
+  closeOverlay();
+  startNet(color, code, conn);
+}
 
 function startLocal() {
+  closeLobby();
   net = null; mySide = null;
   boardFlipped = false;
   state = C.createInitialState({ deal: 3, seedPickup: true });
   render();
 }
 
-function startNet(side, channel) {
+function startNet(side, channel, conn) {
   mySide = side; roomCode = channel;
+  try { if (typeof history !== "undefined" && history.replaceState && typeof location !== "undefined") history.replaceState(null, "", location.pathname + "?room=" + encodeURIComponent(channel)); } catch (_) {}
   boardFlipped = (side === "player2"); // Black starts with the board flipped to their side
   const seed = hashSeed(channel);
-  net = WackyChessNet.createRoom({ me: side, seed, deal: 3, transport: WackyChessNet.broadcastTransport("wacky-chess:" + channel), seedPickup: true });
+  net = WackyChessNet.createRoom({ me: side, seed, deal: 3, transport: conn || makeTransport(channel), seedPickup: true });
   state = net.state();
   net.subscribe((s) => { state = s; render(); });
+  if (net.onNetStatus) net.onNetStatus(() => renderTurnIndicator());
   render();
 }
 
@@ -256,14 +300,29 @@ function buildStartOverlay() {
   const ov = document.createElement("div");
   ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.88);color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:system-ui,sans-serif;gap:12px;z-index:50;";
   const title = document.createElement("h2"); title.textContent = "Wacky Chess"; title.style.margin = "0"; ov.appendChild(title);
-  const hint = document.createElement("div"); hint.textContent = "Local hotseat, or open two browser tabs and Join the same room to play across them."; hint.style.cssText = "opacity:.8;margin-bottom:6px;text-align:center;max-width:360px;"; ov.appendChild(hint);
-  const room = document.createElement("input"); room.value = "room-1"; room.style.cssText = "padding:6px 10px;font-size:16px;border-radius:6px;border:none;text-align:center;"; ov.appendChild(room);
-  const mk = (label, fn) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.style.cssText = "padding:8px 16px;font-size:16px;border-radius:6px;border:none;cursor:pointer;"; b.addEventListener("click", fn); ov.appendChild(b); };
-  const close = () => ov.remove();
-  mk("Play Locally", () => { close(); startLocal(); });
-  mk("Join as White", () => { close(); startNet("player1", room.value || "room-1"); });
-  mk("Join as Black", () => { close(); startNet("player2", room.value || "room-1"); });
+  const online = !!LIVEBLOCKS_PUBLIC_KEY && LIVEBLOCKS_PUBLIC_KEY !== "REPLACE_WITH_YOUR_PK_KEY";
+  const hint = document.createElement("div"); hint.textContent = online ? "Local hotseat, or open the same room link on any two devices to play online." : "Local hotseat, or open two browser tabs and Join the same room to play across them."; hint.style.cssText = "opacity:.8;margin-bottom:6px;text-align:center;max-width:360px;"; ov.appendChild(hint);
+  const defaultCode = roomCodeFromUrl() || randomRoomCode();
+  const room = document.createElement("input"); room.value = defaultCode; room.spellcheck = false; room.addEventListener("focus", () => room.select()); room.style.cssText = "padding:6px 10px;font-size:16px;border-radius:6px;border:none;text-align:center;font-family:ui-monospace,monospace;"; ov.appendChild(room);
+  const mk = (label, fn) => { const b = document.createElement("button"); b.type = "button"; b.className = "menu-btn"; b.textContent = label; b.style.cssText = "padding:8px 16px;font-size:16px;border-radius:6px;border:none;"; b.addEventListener("click", fn); ov.appendChild(b); return b; };
+  let whiteBtn, blackBtn;
+  function refresh() {
+    if (!whiteBtn || !blackBtn) return;
+    const s = (lobby && lobby.presence) ? lobby.presence.seats() : { white: false, black: false };
+    whiteBtn.disabled = s.white; blackBtn.disabled = s.black;
+    whiteBtn.textContent = "Join as White" + (s.white ? "  (taken)" : "");
+    blackBtn.textContent = "Join as Black" + (s.black ? "  (taken)" : "");
+  }
+  const removeOverlay = () => ov.remove();
+  mk("Play Locally", () => { closeLobby(); removeOverlay(); startLocal(); });
+  whiteBtn = mk("Join as White", () => joinSide("player1", removeOverlay, refresh));
+  blackBtn = mk("Join as Black", () => joinSide("player2", removeOverlay, refresh));
+  const note = document.createElement("div"); note.textContent = "Share the room code or the link — the first to join plays White. Close the tab and your color frees up to rejoin."; note.style.cssText = "opacity:.7;margin-top:2px;text-align:center;max-width:360px;font-size:14px;"; ov.appendChild(note);
   document.body.appendChild(ov);
+  refresh();
+  openLobby(defaultCode, refresh);   // no-op in tests (no WackyChessNet); connects in the browser
+  let deb = null;
+  room.addEventListener("input", () => { clearTimeout(deb); deb = setTimeout(() => openLobby(room.value.trim() || defaultCode, refresh), 300); });
 }
 
 // ---------- wiring + init ----------

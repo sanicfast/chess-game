@@ -60,6 +60,10 @@ h1 {
   display: none;
 }
 
+/* Start-menu buttons: grey out a color whose seat is already taken */
+.menu-btn { cursor: pointer; }
+.menu-btn:disabled { opacity: .45; cursor: not-allowed; filter: grayscale(1); text-decoration: line-through; }
+
 .square.last-move {
   box-shadow: inset 0 0 0 9999px rgba(60, 222, 71, 0.2);
 }
