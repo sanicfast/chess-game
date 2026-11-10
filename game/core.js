@@ -272,15 +272,18 @@
     for (const cand of candidates) { const d = (cand.row - kingRow) ** 2 + (cand.col - kingCol) ** 2; if (d < minD) { minD = d; best = cand; } }
     board[best.row][best.col] = loserIsWhiteKingCaptured ? 'K' : 'k';
   }
+  // opts: { rng?, board?, hands?, seedPickup? } — hands must be JSON ({player1:[{id}],player2:[{id}]}).
   function createInitialState(opts = {}) {
     const rng = opts.rng || Math.random;
     const s = {
-      board: clone(initialBoard), isWhiteTurn: true, turnCounter: 0, gameOver: false, winner: null, draw: false,
-      cardPickups: [], cardQueue: [], hands: { player1: [], player2: [] },
+      board: opts.board ? clone(opts.board) : clone(initialBoard), isWhiteTurn: true, turnCounter: 0, gameOver: false, winner: null, draw: false,
+      cardPickups: [], cardQueue: [],
+      hands: opts.hands ? clone(opts.hands) : { player1: [], player2: [] },
       duckCooldowns: {}, boardColorInverted: false, twoferPending: 0, twoferCardsBlocked: false,
       pawnDouble: null, nextCardSpawnAt: randomSpawnInterval(rng),
       history: [], historyIndex: -1,
     };
+    if (opts.seedPickup) spawnPickup(s, rng);
     pushSnapshot(s); // history[0] = starting position, so the first move is undoable
     return s;
   }
@@ -291,6 +294,8 @@
     const { from, to } = action;
     const piece = s.board[from.row][from.col];
     if (!piece) return s;
+    // Only the player on turn may move their own pieces (the duck is neutral/communal).
+    if (piece !== 'D' && !isOwnPiece(piece, s.isWhiteTurn)) return s;
     let legal;
     if (piece === 'D') {
       legal = !s.duckCooldowns[from.row + ',' + from.col] && s.board[to.row][to.col] === '' && !s.cardPickups.some((p) => p.row === to.row && p.col === to.col);
