@@ -317,7 +317,7 @@ function buildStartOverlay() {
   mk("Play Locally", () => { closeLobby(); removeOverlay(); startLocal(); });
   whiteBtn = mk("Join as White", () => joinSide("player1", removeOverlay, refresh));
   blackBtn = mk("Join as Black", () => joinSide("player2", removeOverlay, refresh));
-  const note = document.createElement("div"); note.textContent = "Share the room code or the link — the first to join plays White. Close the tab and your color frees up to rejoin."; note.style.cssText = "opacity:.7;margin-top:2px;text-align:center;max-width:360px;font-size:14px;"; ov.appendChild(note);
+  const note = document.createElement("div"); note.textContent = "Choose your color and share the room code or the link after joining."; note.style.cssText = "opacity:.7;margin-top:2px;text-align:center;max-width:360px;font-size:14px;"; ov.appendChild(note);
   document.body.appendChild(ov);
   refresh();
   openLobby(defaultCode, refresh);   // no-op in tests (no WackyChessNet); connects in the browser
