@@ -1,5 +1,5 @@
-// Duck Chess — pure game core. NO DOM, NO globals required.
-// Runs in the browser (attaches globalThis.DuckChessCore) and in Node (module.exports).
+// Wacky Chess — pure game core. NO DOM, NO globals required.
+// Runs in the browser (attaches globalThis.WackyChessCore) and in Node (module.exports).
 // All state is plain JSON (numbers/strings/arrays/objects) so it can be serialized,
 // stored, and synced for online play. Randomness is injected via an `rng` argument
 // (defaults to Math.random) so the engine can be made deterministic for replay/sync.
@@ -193,6 +193,7 @@
     for (const key of Object.keys(s.duckCooldowns)) { const [r, c] = key.split(',').map(Number); rc[(7 - c) + ',' + r] = s.duckCooldowns[key]; }
     next.duckCooldowns = rc;
     next.boardColorInverted = !s.boardColorInverted;
+    next.highlight = []; // rotation invalidates the previous move's coordinates
     return next;
   }
 
@@ -207,6 +208,7 @@
       twoferCardsBlocked: s.twoferCardsBlocked, nextCardSpawnAt: s.nextCardSpawnAt,
       winner: s.winner, draw: s.draw,
       pawnDouble: s.pawnDouble ? clone(s.pawnDouble) : null,
+      highlight: clone(s.highlight || []),
     };
   }
   function restoreFromSnapshot(s, snap) {
@@ -217,6 +219,7 @@
     s.twoferCardsBlocked = snap.twoferCardsBlocked; s.nextCardSpawnAt = snap.nextCardSpawnAt;
     s.winner = snap.winner; s.draw = snap.draw;
     s.pawnDouble = snap.pawnDouble ? clone(snap.pawnDouble) : null;
+    s.highlight = clone(snap.highlight || []);
   }
   function pushSnapshot(s) {
     if (s.historyIndex < s.history.length - 1) s.history = s.history.slice(0, s.historyIndex + 1);
@@ -272,17 +275,22 @@
     for (const cand of candidates) { const d = (cand.row - kingRow) ** 2 + (cand.col - kingCol) ** 2; if (d < minD) { minD = d; best = cand; } }
     board[best.row][best.col] = loserIsWhiteKingCaptured ? 'K' : 'k';
   }
-  // opts: { rng?, board?, hands?, seedPickup? } — hands must be JSON ({player1:[{id}],player2:[{id}]}).
+  // opts: { rng?, seed?, board?, hands?, deal?, seedPickup? } — hands must be JSON ({player1:[{id}],player2:[{id}]});
+  // deal: number of random cards to deal each player at start (uses the seeded rng → identical for online peers).
   function createInitialState(opts = {}) {
-    const rng = opts.rng || Math.random;
+    const rng = opts.seed != null ? mulberry32(opts.seed) : (opts.rng || Math.random);
     const s = {
       board: opts.board ? clone(opts.board) : clone(initialBoard), isWhiteTurn: true, turnCounter: 0, gameOver: false, winner: null, draw: false,
       cardPickups: [], cardQueue: [],
       hands: opts.hands ? clone(opts.hands) : { player1: [], player2: [] },
       duckCooldowns: {}, boardColorInverted: false, twoferPending: 0, twoferCardsBlocked: false,
-      pawnDouble: null, nextCardSpawnAt: randomSpawnInterval(rng),
+      pawnDouble: null, highlight: [], nextCardSpawnAt: randomSpawnInterval(rng),
       history: [], historyIndex: -1,
     };
+    if (opts.deal > 0) {
+      const deal = (p) => { for (let i = 0; i < opts.deal; i++) s.hands[p].push({ id: CARDS[Math.floor(rng() * CARDS.length)].id }); };
+      deal('player1'); deal('player2');
+    }
     if (opts.seedPickup) spawnPickup(s, rng);
     pushSnapshot(s); // history[0] = starting position, so the first move is undoable
     return s;
@@ -330,6 +338,7 @@
       for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) { const p = s.board[r][c]; if (p && p !== 'D' && (p === p.toUpperCase()) === loserWhite) loserPieces++; }
       if (loserPieces === 0) { s.gameOver = true; s.winner = s.isWhiteTurn ? 'White' : 'Black'; }
     }
+    s.highlight = [{ row: from.row, col: from.col }, { row: to.row, col: to.col }];
     endTurnCore(s, rng);
     return s;
   }
@@ -340,13 +349,14 @@
   function applyCardEffect(s, by, cardId, ctx, rng) {
     const moverWhite = by === 'player1';
     const oppBy = moverWhite ? 'player2' : 'player1';
+    s.highlight = []; // a card play resets the board highlight; board-changing effects below set it
     if (cardId === 'rotate') {
       const r = rotateState(s);
       s.board = r.board; s.cardPickups = r.cardPickups; s.duckCooldowns = r.duckCooldowns; s.boardColorInverted = r.boardColorInverted;
     } else if (cardId === 'duck') {
       let t = ctx.target;
       if (!t) { const opts2 = getDuckMoves(s.board, s.cardPickups); if (opts2.length) t = opts2[Math.floor(rng() * opts2.length)]; }
-      if (t) s.board[t.row][t.col] = 'D';
+      if (t) { s.board[t.row][t.col] = 'D'; s.highlight = [{ row: t.row, col: t.col }]; }
     } else if (cardId === 'twofer') {
       s.twoferPending = 1; s.twoferCardsBlocked = true;
     } else if (cardId === 'rewind') {
@@ -357,14 +367,15 @@
     } else if (cardId === 'kingify') {
       const opp = [];
       for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) { const p = s.board[r][c]; if (p && p !== 'D' && (p === p.toUpperCase()) === !moverWhite && p.toLowerCase() !== 'k') opp.push({ row: r, col: c }); }
-      if (opp.length) { const pick = opp[pickIndex(opp.length, ctx.choice, rng)]; s.board[pick.row][pick.col] = moverWhite ? 'k' : 'K'; }
+      if (opp.length) { const pick = opp[pickIndex(opp.length, ctx.choice, rng)]; s.board[pick.row][pick.col] = moverWhite ? 'k' : 'K'; s.highlight = [{ row: pick.row, col: pick.col }]; }
     } else if (cardId === 'passedpawn') {
       const row = moverWhite ? 1 : 6; const empty = []; for (let i = 0; i < 8; i++) if (s.board[row][i] === '') empty.push(i);
-      if (empty.length) s.board[row][empty[pickIndex(empty.length, ctx.choice, rng)]] = moverWhite ? 'P' : 'p';
+      if (empty.length) { const col = empty[pickIndex(empty.length, ctx.choice, rng)]; s.board[row][col] = moverWhite ? 'P' : 'p'; s.highlight = [{ row, col }]; }
     } else if (cardId === 'pawnarmy') {
       const row = moverWhite ? 6 : 1; const pawn = moverWhite ? 'P' : 'p'; const cols = []; for (let i = 0; i < 8; i++) if (s.board[row][i] === '') cols.push(i);
-      const chs = Array.isArray(ctx.choices) ? ctx.choices : null; const count = Math.min(cols.length, MAX_PAWN_ARMY_SUMMONS);
-      for (let i = 0; i < count; i++) { const pi = (chs && Number.isInteger(chs[i]) && chs[i] >= 0 && chs[i] < cols.length) ? chs[i] : Math.floor(rng() * cols.length); s.board[row][cols[pi]] = pawn; cols.splice(pi, 1); }
+      const chs = Array.isArray(ctx.choices) ? ctx.choices : null; const count = Math.min(cols.length, MAX_PAWN_ARMY_SUMMONS); const placed = [];
+      for (let i = 0; i < count; i++) { const pi = (chs && Number.isInteger(chs[i]) && chs[i] >= 0 && chs[i] < cols.length) ? chs[i] : Math.floor(rng() * cols.length); const col = cols[pi]; s.board[row][col] = pawn; cols.splice(pi, 1); placed.push({ row, col }); }
+      s.highlight = placed;
     } else if (cardId === 'fundeleter') {
       const opp = s.hands[oppBy]; if (opp.length) opp.splice(pickIndex(opp.length, ctx.choice, rng), 1);
     } else if (cardId === 'yoink') {
@@ -440,12 +451,24 @@
     }
   }
 
+  // Rebuild a game purely from an action log — the basis for online replay/sync.
+  // actions: array of actions (or {actor, action} entries). opts: { seed? | rng?, hands?, seedPickup? }.
+  function replay(actions, opts = {}) {
+    const rng = opts.seed != null ? mulberry32(opts.seed) : (opts.rng || Math.random);
+    let s = createInitialState({ rng, hands: opts.hands, deal: opts.deal, seedPickup: opts.seedPickup });
+    for (const entry of actions) {
+      const action = (entry && entry.action) ? entry.action : entry;
+      s = applyAction(s, action, { rng });
+    }
+    return s;
+  }
+
   const Core = {
     CARDS, cardById, initialBoard, DUCK_COOLDOWN, MAX_PAWN_ARMY_SUMMONS, inBounds, isOpponent, isOwnPiece,
     isSquareAttacked, getSlidingMoves, getStepMoves, getDuckMoves, getPossibleMoves, rotateState,
     isActivePlayerDeadlocked: isActivePlayerDeadlockedCore,
-    createInitialState, applyAction, blastFrames,
+    createInitialState, applyAction, replay, blastFrames,
   };
-  root.DuckChessCore = Core;
+  root.WackyChessCore = Core;
   if (typeof module !== 'undefined' && module.exports) module.exports = Core;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

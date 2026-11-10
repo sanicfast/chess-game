@@ -251,3 +251,50 @@ test('a side with no cards/pieces/duck is stalemated on their turn', () => {
   assert.equal(n.draw, true, 'black is deadlocked -> stalemate');
   assert.equal(n.gameOver, true);
 });
+
+
+test('replay: rebuilding from an action log matches step-by-step apply', () => {
+  const seed = 11;
+  const actions = [
+    { type: 'move', from: { row: 6, col: 4 }, to: { row: 4, col: 4 }, seed: 101 },
+    { type: 'move', from: { row: 1, col: 4 }, to: { row: 3, col: 4 }, seed: 102 },
+    { type: 'move', from: { row: 7, col: 6 }, to: { row: 5, col: 5 }, seed: 103 },
+  ];
+  let s = C.createInitialState({ seed });
+  for (const a of actions) s = C.applyAction(s, a, { rng: makeRng(1) });
+  const stepped = JSON.stringify(s);
+  const repl = JSON.stringify(C.replay(actions, { seed, rng: makeRng(1) }));
+  assert.equal(repl, stepped);
+});
+
+test('createInitialState: deal deals N cards per player and is seed-deterministic', () => {
+  const a = C.createInitialState({ seed: 42, deal: 3 });
+  assert.equal(a.hands.player1.length, 3, 'white dealt 3');
+  assert.equal(a.hands.player2.length, 3, 'black dealt 3');
+  assert.ok(a.hands.player1.concat(a.hands.player2).every((c) => C.cardById(c.id)), 'all ids valid');
+  const b = C.createInitialState({ seed: 42, deal: 3 });
+  assert.deepEqual(b.hands, a.hands, 'same seed -> identical hands');
+  const c = C.createInitialState({ seed: 99, deal: 3 });
+  assert.notDeepEqual(c.hands, a.hands, 'different seed -> different hands');
+});
+
+test('applyMove records lastMove (from/to); undo clears it', () => {
+  let s = C.createInitialState();
+  s = C.applyAction(s, { type: 'move', from: { row: 6, col: 4 }, to: { row: 4, col: 4 } });
+  assert.deepEqual(s.highlight.map((x) => [x.row, x.col]).sort(), [[4, 4], [6, 4]]);
+  s = C.applyAction(s, { type: 'undo' });
+  assert.equal(s.highlight.length, 0, "undo clears highlight");
+});
+
+test('board-changing cards set highlight to the affected squares', () => {
+  let s = C.createInitialState({ hands: { player1: [{ id: 'kingify' }], player2: [] } });
+  s = C.applyAction(s, { type: 'playCard', by: 'player1', cardId: 'kingify', choice: 0 });
+  assert.equal(s.highlight.length, 1, "kingify highlights exactly one square");
+  const sq = s.highlight[0];
+  assert.equal(s.board[sq.row][sq.col], 'k', 'the highlighted square is the converted king');
+  let d = C.createInitialState({ hands: { player1: [{ id: 'duck' }], player2: [] } });
+  const target = C.getDuckMoves(d.board, d.cardPickups)[0];
+  d = C.applyAction(d, { type: 'playCard', by: 'player1', cardId: 'duck', target });
+  assert.ok(d.highlight.some((p) => p.row === target.row && p.col === target.col), "duck square is highlighted");
+  assert.ok(!d.highlight.some((p) => p.row === target.row && p.col === target.col && d.board[p.row][p.col] !== "D"), "highlighted square holds the duck");
+});

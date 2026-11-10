@@ -34,11 +34,13 @@ const SHIM = `
 ;globalThis.__V = {
   getState: () => state,
   setState: (v) => { state = v; selectedSquare = null; possibleMoves = []; pendingPlacement = null; render(); },
-  handleSquareClick, handleCardClick, render,
+  handleSquareClick, handleCardClick, render, undo, redo,
+  __document: document,
   getSelected: () => selectedSquare,
   getPending: () => pendingPlacement,
   getFlipped: () => boardFlipped,
-  C: DuckChessCore,
+  setNetForTest: (n, side) => { net = n; mySide = side; },
+  C: WackyChessCore,
 };`;
 
 function loadGame() {

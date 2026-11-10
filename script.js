@@ -1,27 +1,39 @@
-// Duck Chess — view / controller. The authoritative game lives in game/core.js
-// (DuckChessCore). This file only renders state, turns DOM events into actions, and
-// dispatches them through DuckChessCore.applyAction. No game rules live here.
-const C = DuckChessCore;
+// Wacky Chess — view / controller. Authoritative game logic lives in game/core.js
+// (WackyChessCore); multiplayer sync lives in net.js (WackyChessNet). This file only
+// renders state and turns clicks into actions. No game rules live here.
+const C = WackyChessCore;
 const boardEl = document.getElementById("chessboard");
 
 const pieceClasses = {
   p: "black-pawn",  r: "black-rook",  n: "black-knight",  b: "black-bishop",  q: "black-queen",  k: "black-king",
   P: "white-pawn",  R: "white-rook",  N: "white-knight",  B: "white-bishop",  Q: "white-queen",  K: "white-king"
 };
-const BLAST_STEP_DELAY_MS = 1500; // Pause between each Blast sub-card so effects are visible.
+const BLAST_STEP_DELAY_MS = 1500;
 
-// --- authoritative state (from the core) + view-only ephemera ---
-let state = null;              // serializable GameState owned by the core
-let selectedSquare = null;     // {row,col,piece} UI selection, not game state
-let possibleMoves = [];        // legal moves for the selection, recomputed for render
-let pendingPlacement = null;   // card-targeting mode: { cardId, by, index, validTargets }
-let boardFlipped = false;      // render perspective only
-let isAnimating = false;       // true while Blast frames play
+// --- authoritative state + view-only ephemera ---
+let state = null;              // serializable GameState
+let selectedSquare = null;
+let possibleMoves = [];
+let pendingPlacement = null;
+let boardFlipped = false;
+let isAnimating = false;
+// --- multiplayer ---
+let net = null;               // WackyChessNet room when in net mode, else null
+let mySide = null;            // 'player1' | 'player2' when in net mode
+let roomCode = null;          // room/channel name in net mode
 
 function dispatch(action) { state = C.applyAction(state, action); render(); }
+function dispatchMove(from, to) {
+  if (net) { net.move(from, to); }
+  else { state = C.applyAction(state, { type: "move", from, to }); render(); }
+}
+function dispatchCard(by, cardId, target) {
+  if (net) { net.playCard(cardId, target); }
+  else { state = C.applyAction(state, { type: "playCard", by, cardId, target }); render(); }
+}
 
 // ---------- rendering ----------
-function render() { renderBoard(); renderHands(); renderTurnIndicator(); renderGameOver(); }
+function render() { renderBoard(); renderHands(); renderTurnIndicator(); renderGameOver(); renderYourTurn(); }
 
 function renderBoard() {
   boardEl.innerHTML = "";
@@ -35,6 +47,8 @@ function renderBoard() {
       if (selectedSquare && selectedSquare.row === row && selectedSquare.col === col) square.classList.add("selected");
       if (possibleMoves.some((m) => m.row === row && m.col === col)) square.classList.add("possible-move");
       if (pendingPlacement && pendingPlacement.validTargets.some((p) => p.row === row && p.col === col)) square.classList.add("targetable");
+      const hl = state.highlight || [];
+      if (hl.some((m) => m.row === row && m.col === col)) square.classList.add("last-move");
 
       const piece = state.board[row][col];
       if (piece) {
@@ -97,7 +111,15 @@ function createCardElement(cardDef, index, player) {
 
 function renderTurnIndicator() {
   const t = document.getElementById("turn-indicator");
-  if (t) t.textContent = state.isWhiteTurn ? "White" + String.fromCharCode(39) + "s turn" : "Black" + String.fromCharCode(39) + "s turn";
+  if (t) {
+    let label = state.isWhiteTurn ? "White\u2019s turn" : "Black\u2019s turn";
+    if (net && mySide) {
+      const who = mySide === "player1" ? "You are White" : "You are Black";
+      const conn = net.peerOnline() ? "opponent connected" : "waiting for opponent...";
+      label += " | " + who + " | room: " + roomCode + " | " + conn;
+    }
+    t.textContent = label;
+  }
 }
 
 function renderGameOver() {
@@ -109,44 +131,52 @@ function renderGameOver() {
     msg.innerHTML = "";
     msg.classList.add("hidden");
   }
-  const disabled = state.gameOver || isAnimating;
+  const disabled = state.gameOver || isAnimating || !!net; // no undo/redo in multiplayer
   document.getElementById("undo-button").disabled = disabled;
   document.getElementById("redo-button").disabled = disabled;
 }
 
+// Big "YOUR TURN" banner beneath the board — only meaningful in online play (net mode),
+// where you control a single color. In local hotseat there is no separate "you", so it stays hidden.
+function renderYourTurn() {
+  const el = document.getElementById("your-turn");
+  if (!el) return;
+  const show = !!state && !!net && !state.gameOver && !isAnimating && net.canAct();
+  if (show) el.classList.remove("hidden"); else el.classList.add("hidden");
+}
+
 // ---------- interaction ----------
 function handleSquareClick(row, col) {
-  if (state.gameOver || isAnimating) return;
+  if (!state || state.gameOver || isAnimating) return;
 
   if (pendingPlacement) {
     const isValid = pendingPlacement.validTargets.some((p) => p.row === row && p.col === col);
     if (isValid) {
       const by = pendingPlacement.by; const cardId = pendingPlacement.cardId;
       pendingPlacement = null; selectedSquare = null; possibleMoves = [];
-      state = C.applyAction(state, { type: "playCard", by, cardId, target: { row, col } });
-      render();
+      dispatchCard(by, cardId, { row, col });
     } else { pendingPlacement = null; render(); }
     return;
   }
 
   const piece = state.board[row][col];
+  const myTurn = !net || net.canAct(); // in net mode you may only act on your own turn
   if (selectedSquare) {
     const canAct = selectedSquare.piece === "D" ||
       (state.isWhiteTurn && selectedSquare.piece === selectedSquare.piece.toUpperCase()) ||
       (!state.isWhiteTurn && selectedSquare.piece === selectedSquare.piece.toLowerCase());
-    if (canAct && possibleMoves.some((m) => m.row === row && m.col === col)) {
+    if (myTurn && canAct && possibleMoves.some((m) => m.row === row && m.col === col)) {
       const from = { row: selectedSquare.row, col: selectedSquare.col };
       selectedSquare = null; possibleMoves = [];
-      state = C.applyAction(state, { type: "move", from, to: { row, col } });
-      render();
+      dispatchMove(from, { row, col });
       return;
     }
     selectedSquare = null; possibleMoves = [];
   } else if (piece) {
     const duckReady = piece !== "D" || !state.duckCooldowns[row + "," + col];
-    const canSelect = (piece === "D" && duckReady) ||
+    const canSelect = myTurn && ((piece === "D" && duckReady) ||
       (state.isWhiteTurn && piece === piece.toUpperCase()) ||
-      (!state.isWhiteTurn && piece === piece.toLowerCase());
+      (!state.isWhiteTurn && piece === piece.toLowerCase()));
     if (canSelect) {
       selectedSquare = { row, col, piece };
       possibleMoves = piece === "D"
@@ -158,12 +188,13 @@ function handleSquareClick(row, col) {
 }
 
 function handleCardClick(index, player) {
-  if (state.gameOver || isAnimating) return;
+  if (!state || state.gameOver || isAnimating) return;
   if (state.twoferCardsBlocked) return;
   if (pendingPlacement) { pendingPlacement = null; render(); }
 
   const by = player === "player1" ? "player1" : "player2";
-  if ((by === "player1") !== state.isWhiteTurn) { console.log("It" + String.fromCharCode(39) + "s not your turn to use a card."); return; }
+  if (net && by !== mySide) return; // in net mode you may only play your own side\u2019s cards
+  if ((by === "player1") !== state.isWhiteTurn) { console.log("It\u2019s not your turn to use a card."); return; }
 
   const ref = state.hands[by][index];
   if (!ref) return;
@@ -179,10 +210,9 @@ function handleCardClick(index, player) {
     return;
   }
 
-  if (ref.id === "blast") { runBlast(by); return; }
+  if (ref.id === "blast") { if (net) { dispatchCard(by, "blast"); } else { runBlast(by); } return; }
   selectedSquare = null; possibleMoves = [];
-  state = C.applyAction(state, { type: "playCard", by, cardId: ref.id });
-  render();
+  dispatchCard(by, ref.id);
 }
 
 function runBlast(by) {
@@ -198,15 +228,47 @@ function runBlast(by) {
   step();
 }
 
-function undo() { if (!isAnimating) dispatch({ type: "undo" }); }
-function redo() { if (!isAnimating) dispatch({ type: "redo" }); }
+function undo() { if (state && !net && !isAnimating) dispatch({ type: "undo" }); }
+function redo() { if (state && !net && !isAnimating) dispatch({ type: "redo" }); }
+
+// ---------- start menu: local or cross-tab multiplayer ----------
+function hashSeed(str) { let h = 2166136261 >>> 0; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+const debugCards = (n) => Array.from({ length: n }, () => ({ id: C.CARDS[Math.floor(Math.random() * C.CARDS.length)].id }));
+
+function startLocal() {
+  net = null; mySide = null;
+  boardFlipped = false;
+  state = C.createInitialState({ deal: 3, seedPickup: true });
+  render();
+}
+
+function startNet(side, channel) {
+  mySide = side; roomCode = channel;
+  boardFlipped = (side === "player2"); // Black starts with the board flipped to their side
+  const seed = hashSeed(channel);
+  net = WackyChessNet.createRoom({ me: side, seed, deal: 3, transport: WackyChessNet.broadcastTransport("wacky-chess:" + channel), seedPickup: true });
+  state = net.state();
+  net.subscribe((s) => { state = s; render(); });
+  render();
+}
+
+function buildStartOverlay() {
+  const ov = document.createElement("div");
+  ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.88);color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:system-ui,sans-serif;gap:12px;z-index:50;";
+  const title = document.createElement("h2"); title.textContent = "Wacky Chess"; title.style.margin = "0"; ov.appendChild(title);
+  const hint = document.createElement("div"); hint.textContent = "Local hotseat, or open two browser tabs and Join the same room to play across them."; hint.style.cssText = "opacity:.8;margin-bottom:6px;text-align:center;max-width:360px;"; ov.appendChild(hint);
+  const room = document.createElement("input"); room.value = "room-1"; room.style.cssText = "padding:6px 10px;font-size:16px;border-radius:6px;border:none;text-align:center;"; ov.appendChild(room);
+  const mk = (label, fn) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.style.cssText = "padding:8px 16px;font-size:16px;border-radius:6px;border:none;cursor:pointer;"; b.addEventListener("click", fn); ov.appendChild(b); };
+  const close = () => ov.remove();
+  mk("Play Locally", () => { close(); startLocal(); });
+  mk("Join as White", () => { close(); startNet("player1", room.value || "room-1"); });
+  mk("Join as Black", () => { close(); startNet("player2", room.value || "room-1"); });
+  document.body.appendChild(ov);
+}
 
 // ---------- wiring + init ----------
 document.getElementById("undo-button").addEventListener("click", undo);
 document.getElementById("redo-button").addEventListener("click", redo);
-document.getElementById("flip-button").addEventListener("click", () => { boardFlipped = !boardFlipped; render(); });
+document.getElementById("flip-button").addEventListener("click", () => { if (!state) return; boardFlipped = !boardFlipped; render(); });
 
-// DEBUG: starting cards for development — in production, cards are earned from board pickups only.
-const debugCards = (n) => Array.from({ length: n }, () => ({ id: C.CARDS[Math.floor(Math.random() * C.CARDS.length)].id }));
-state = C.createInitialState({ hands: { player1: debugCards(4), player2: debugCards(4) }, seedPickup: true });
-render();
+buildStartOverlay();
